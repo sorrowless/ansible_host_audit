@@ -1,0 +1,42 @@
+---
+- name: Разобрать конфигурацию, которую загрузит sshd
+  host_audit_sshd:
+    path: "{{ host_audit_sshd_config }}"
+  register: host_audit_sshd
+  changed_when: false
+
+- name: Зафиксировать SSH-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-01', title, 'high', requirement, remediation) }}"
+    checks: "{{ host_audit_sshd | host_audit_ssh_password_checks }}"
+    title: "SSH: аутентификация только по ключам"
+    requirement: >-
+      В конфигурации, которую загружает sshd, PasswordAuthentication равен no.
+      Учитываются Include, каталог sshd_config.d и блоки Match.
+    remediation: >-
+      Задайте PasswordAuthentication no в файле, который читается первым,
+      и выполните systemctl reload ssh. Более поздний no не отменяет ранний yes.
+
+- name: Зафиксировать SSH-02
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-02', title, 'high', requirement, remediation) }}"
+    checks: "{{ host_audit_sshd | host_audit_ssh_root_checks }}"
+    title: "SSH: вход root запрещён"
+    requirement: PermitRootLogin равен no. Значения prohibit-password и without-password не подходят.
+    remediation: Задайте PermitRootLogin no первым полученным значением и перечитайте конфигурацию sshd.
+
+- name: Зафиксировать SSH-05
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-05', title, 'high', requirement, remediation) }}"
+    checks: "{{ host_audit_sshd | host_audit_ssh_access_checks }}"
+    title: "SSH: доступ ограничен пользователями или адресами"
+    requirement: В эффективной конфигурации есть AllowUsers или AllowGroups, и это не шаблон «разрешить всех».
+    remediation: >-
+      Задайте AllowUsers user или user@10.0.0.0/24.
+      Один только Match Address никого не отсекает: несовпавшие клиенты остаются на глобальных правилах.

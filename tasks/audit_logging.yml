@@ -1,0 +1,107 @@
+---
+- name: Найти файлы правил auditd
+  ansible.builtin.find:
+    paths: /etc/audit/rules.d
+    patterns: "*.rules"
+    file_type: file
+  register: host_audit_audit_rules
+  failed_when: false
+
+- name: Прочитать правила auditd
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ rule_paths }}"
+  vars:
+    rule_paths: "{{ (host_audit_audit_rules.files | default([]) | map(attribute='path') | list) + ['/etc/audit/audit.rules'] }}"
+  register: host_audit_audit_slurp
+  failed_when: false
+  changed_when: false
+
+- name: Собрать текст правил
+  ansible.builtin.set_fact:
+    host_audit_rules_text: "{{ (host_audit_rules_text | default('')) + (item.content | b64decode) + '\n' }}"
+  loop: "{{ host_audit_audit_slurp.results }}"
+  when: item.content is defined
+
+- name: Спросить состояние подсистемы audit
+  ansible.builtin.command:
+    argv: [auditctl, -s]
+  register: host_audit_auditctl
+  changed_when: false
+  failed_when: false
+
+- name: Проверить, включён ли unit auditd
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, auditd.service]
+  register: host_audit_audit_enabled
+  changed_when: false
+  failed_when: false
+
+- name: Зафиксировать AUD-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('AUD-01', title, 'high', requirement, remediation) }}"
+    checks: >-
+      {{
+        host_audit_services | host_audit_audit_checks(
+          host_audit_rules_text | default(''),
+          host_audit_auditctl.rc | default(127),
+          ((host_audit_auditctl.stderr | default('')) + ' ' + (host_audit_auditctl.msg | default(''))),
+          (host_audit_audit_enabled.stdout | default(''))
+        )
+      }}
+    title: "Включён аудит критических событий"
+    requirement: auditd включён и следит за identity-файлами, sudoers и сменой времени.
+    remediation: Установите auditd, положите правила в /etc/audit/rules.d и выполните systemctl enable --now auditd.
+
+- name: Найти конфигурации доставки логов
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    file_type: file
+    recurse: false
+  loop:
+    - /etc/rsyslog.d
+    - /etc/filebeat
+    - /etc/vector
+  register: host_audit_log_dirs
+  failed_when: false
+
+- name: Собрать пути конфигурации логов
+  ansible.builtin.set_fact:
+    host_audit_log_paths: >-
+      {{
+        ['/etc/rsyslog.conf', '/etc/systemd/journal-upload.conf', '/etc/filebeat/filebeat.yml']
+        + (
+          host_audit_log_dirs.results | default([])
+          | selectattr('files', 'defined')
+          | map(attribute='files')
+          | flatten
+          | map(attribute='path')
+          | list
+        )
+      }}
+
+- name: Прочитать конфигурации доставки логов
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ host_audit_log_paths | unique }}"
+  register: host_audit_log_slurp
+  failed_when: false
+  changed_when: false
+
+- name: Сложить конфигурации доставки
+  ansible.builtin.set_fact:
+    host_audit_log_files: "{{ host_audit_log_files | default([]) + [{'path': item.item, 'content': item.content | b64decode}] }}"
+  loop: "{{ host_audit_log_slurp.results }}"
+  when: item.content is defined
+
+- name: Зафиксировать LOG-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('LOG-01', title, 'high', requirement, remediation) }}"
+    checks: "{{ (host_audit_log_files | default([])) | host_audit_log_checks(host_audit_services) }}"
+    title: "Логи уходят в центральное хранилище"
+    requirement: Настроен и запущен rsyslog, journal-upload, filebeat или vector с удалённым приёмником.
+    remediation: Добавьте незакомментированную строку *.* @@collector:514 и держите rsyslog запущенным.

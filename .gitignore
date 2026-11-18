@@ -1,0 +1,10 @@
+.venv/
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+molecule/*/.fixtures/
+molecule/*/roles/
+*.retry
+.ansible/
+*.log

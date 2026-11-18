@@ -1,0 +1,87 @@
+---
+- name: Прочитать состояние ufw
+  ansible.builtin.command:
+    argv: [ufw, status, verbose]
+  register: host_audit_ufw
+  changed_when: false
+  failed_when: false
+
+- name: Прочитать состояние firewalld
+  ansible.builtin.command:
+    argv: [firewall-cmd, --state]
+  register: host_audit_firewalld_state
+  changed_when: false
+  failed_when: false
+
+- name: Узнать зону firewalld
+  ansible.builtin.command:
+    argv: [firewall-cmd, --get-default-zone]
+  register: host_audit_firewalld_zone
+  changed_when: false
+  failed_when: false
+  when: host_audit_firewalld_state.rc == 0
+
+- name: Прочитать target зоны firewalld
+  ansible.builtin.command:
+    argv: [firewall-cmd, "--zone={{ host_audit_firewalld_zone.stdout | trim }}", --get-target]
+  register: host_audit_firewalld_target
+  changed_when: false
+  failed_when: false
+  when: host_audit_firewalld_state.rc == 0
+
+- name: Прочитать порты firewalld
+  ansible.builtin.command:
+    argv: [firewall-cmd, "--zone={{ host_audit_firewalld_zone.stdout | trim }}", --list-ports]
+  register: host_audit_firewalld_ports
+  changed_when: false
+  failed_when: false
+  when: host_audit_firewalld_state.rc == 0
+
+- name: Прочитать сервисы firewalld
+  ansible.builtin.command:
+    argv: [firewall-cmd, "--zone={{ host_audit_firewalld_zone.stdout | trim }}", --list-services]
+  register: host_audit_firewalld_services
+  changed_when: false
+  failed_when: false
+  when: host_audit_firewalld_state.rc == 0
+
+- name: Прочитать правила nftables
+  ansible.builtin.command:
+    argv: [nft, list, ruleset]
+  register: host_audit_nft
+  changed_when: false
+  failed_when: false
+
+- name: Прочитать политику iptables
+  ansible.builtin.command:
+    argv: [iptables, -S]
+  register: host_audit_iptables
+  changed_when: false
+  failed_when: false
+
+- name: Зафиксировать FW-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('FW-01', title, 'critical', requirement, remediation) }}"
+    checks: >-
+      {{
+        observed | host_audit_firewall_checks(
+          host_audit_services,
+          host_audit_allowed_tcp_ports,
+          host_audit_allowed_udp_ports
+        )
+      }}
+    observed:
+      ufw_text: "{{ host_audit_ufw.stdout | default('') }}"
+      firewalld_active: "{{ host_audit_firewalld_state.rc == 0 and 'running' in (host_audit_firewalld_state.stdout | default('')) }}"
+      firewalld_target: "{{ host_audit_firewalld_target.stdout | default('') | trim }}"
+      firewalld_ports: "{{ (host_audit_firewalld_ports.stdout | default('')).split() }}"
+      firewalld_services: "{{ (host_audit_firewalld_services.stdout | default('')).split() }}"
+      nft_text: "{{ host_audit_nft.stdout | default('') }}"
+      iptables_text: "{{ host_audit_iptables.stdout | default('') }}"
+    title: "Firewall запрещает вход по умолчанию"
+    requirement: Включён ufw, firewalld, nftables или iptables. Несовпавший вход отбрасывается, открыты только разрешённые порты.
+    remediation: >-
+      Включите default-deny (ufw default deny incoming, зона firewalld не ACCEPT
+      или chain input с policy drop) и оставьте только порты из host_audit_allowed_tcp_ports.

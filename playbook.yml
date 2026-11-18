@@ -1,0 +1,3 @@
+---
+- name: Аудит базовой защищённости
+  ansible.builtin.import_playbook: run-host-audit.yml

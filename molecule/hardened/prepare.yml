@@ -1,0 +1,421 @@
+---
+- name: Prepare hardened
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Каталог фикстур на управляющей машине
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/.fixtures/controller-keys"
+        state: "{{ item }}"
+        mode: "0700"
+      loop:
+        - absent
+        - directory
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Ключ контроллера с парольной фразой
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -t
+          - ed25519
+          - -N
+          - molecule-passphrase
+          - -f
+          - "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/.fixtures/controller-keys/id_ed25519"
+          - -q
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+
+    - name: Не запускать сервисы из postinst
+      ansible.builtin.copy:
+        dest: /usr/sbin/policy-rc.d
+        content: |
+          #!/bin/sh
+          exit 101
+        mode: "0755"
+
+    - name: Установить пакеты базового профиля
+      ansible.builtin.apt:
+        name:
+          - openssh-server
+          - fail2ban
+          - nftables
+          - unattended-upgrades
+          - auditd
+          - chrony
+          - libpam-pwquality
+          - libpam-google-authenticator
+          - rsyslog
+          - sudo
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Учётка, которой разрешён SSH
+      ansible.builtin.user:
+        name: auditor
+        shell: /bin/bash
+        create_home: true
+
+    - name: Найти чужие drop-in sshd
+      ansible.builtin.find:
+        paths: /etc/ssh/sshd_config.d
+        file_type: file
+      register: host_audit_old_dropins
+
+    - name: Удалить чужие drop-in sshd
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ host_audit_old_dropins.files }}"
+
+    - name: Основной файл намеренно содержит слабые значения после Include
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config
+        mode: "0600"
+        content: |
+          Include /etc/ssh/sshd_config.d/*.conf
+          Port 22
+          PasswordAuthentication yes
+          PermitRootLogin yes
+          KbdInteractiveAuthentication no
+          UsePAM no
+          PubkeyAuthentication yes
+
+    - name: Ранний drop-in задаёт рабочую политику SSH
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-hardening.conf
+        mode: "0600"
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin no
+          AllowUsers auditor
+          AuthenticationMethods publickey,keyboard-interactive
+          KbdInteractiveAuthentication yes
+          UsePAM yes
+          PubkeyAuthentication yes
+
+    - name: Второй фактор в PAM sshd
+      ansible.builtin.lineinfile:
+        path: /etc/pam.d/sshd
+        line: auth required pam_google_authenticator.so
+        insertbefore: BOF
+        state: present
+
+    - name: Ключи хоста и каталог privilege separation
+      ansible.builtin.command:
+        argv: [ssh-keygen, -A]
+      changed_when: false
+
+    - name: Каталог /run/sshd
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        mode: "0755"
+
+    - name: Jail fail2ban для sshd
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/sshd.local
+        mode: "0644"
+        content: |
+          [sshd]
+          enabled = true
+          backend = polling
+          mode = normal
+
+    - name: Правила nftables default-deny
+      ansible.builtin.copy:
+        dest: /etc/nftables.conf
+        mode: "0644"
+        content: |
+          #!/usr/sbin/nft -f
+          flush ruleset
+          table inet host_audit {
+            chain input {
+              type filter hook input priority 0; policy drop;
+              ct state established,related accept
+              iif "lo" accept
+              tcp dport 22 accept
+              ip protocol icmp accept
+              ip6 nexthdr icmpv6 accept
+            }
+            chain forward {
+              type filter hook forward priority 0; policy drop;
+            }
+            chain output {
+              type filter hook output priority 0; policy accept;
+            }
+          }
+
+    - name: Включить установку security-обновлений
+      ansible.builtin.copy:
+        dest: "{{ item.dest }}"
+        mode: "0644"
+        content: "{{ item.content }}"
+      loop:
+        - dest: /etc/apt/apt.conf.d/20auto-upgrades
+          content: |
+            APT::Periodic::Update-Package-Lists "1";
+            APT::Periodic::Unattended-Upgrade "1";
+        - dest: /etc/apt/apt.conf.d/52host-audit-security
+          content: |
+            Unattended-Upgrade::Allowed-Origins {
+                "${distro_id}:${distro_codename}-security";
+            };
+
+    - name: Правила auditd
+      ansible.builtin.copy:
+        dest: /etc/audit/rules.d/99-host-audit.rules
+        mode: "0640"
+        content: |
+          -w /etc/passwd -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/gshadow -p wa -k identity
+          -w /etc/sudoers -p wa -k sudoers
+          -w /etc/sudoers.d -p wa -k sudoers
+          -a always,exit -F arch=b64 -S adjtimex,settimeofday -S clock_settime -k time-change
+          -a always,exit -F arch=b32 -S adjtimex,settimeofday -S clock_settime -k time-change
+          -w /etc/ssh/sshd_config -p wa -k sshd
+          -w /etc/ssh/sshd_config.d -p wa -k sshd
+
+    - name: Пересылка логов на выделенный приёмник
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/99-remote.conf
+        mode: "0644"
+        content: |
+          *.* @@192.0.2.10:514
+
+    - name: Парольная политика login.defs
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - {regexp: '^#?\s*PASS_MAX_DAYS\b', line: 'PASS_MAX_DAYS 365'}
+        - {regexp: '^#?\s*PASS_MIN_DAYS\b', line: 'PASS_MIN_DAYS 1'}
+        - {regexp: '^#?\s*PASS_WARN_AGE\b', line: 'PASS_WARN_AGE 7'}
+        - {regexp: '^#?\s*ENCRYPT_METHOD\b', line: 'ENCRYPT_METHOD yescrypt'}
+
+    - name: Настроить pwquality
+      ansible.builtin.copy:
+        dest: /etc/security/pwquality.conf
+        mode: "0644"
+        content: |
+          minlen = 14
+          minclass = 4
+          dcredit = -1
+          ucredit = -1
+          lcredit = -1
+          ocredit = -1
+
+    - name: Настроить faillock
+      ansible.builtin.copy:
+        dest: /etc/security/faillock.conf
+        mode: "0644"
+        content: |
+          deny = 5
+          unlock_time = 900
+
+    - name: Срок неактивности пароля
+      ansible.builtin.lineinfile:
+        path: /etc/default/useradd
+        regexp: '^#?\s*INACTIVE='
+        line: INACTIVE=30
+
+    - name: PAM-модули качества и блокировки пароля
+      ansible.builtin.lineinfile:
+        path: "{{ item.path }}"
+        line: "{{ item.line }}"
+        insertbefore: BOF
+      loop:
+        - {path: /etc/pam.d/common-password, line: 'password requisite pam_pwquality.so retry=3'}
+        - {path: /etc/pam.d/common-password, line: 'password required pam_pwhistory.so remember=5 use_authtok'}
+        - {path: /etc/pam.d/common-auth, line: 'auth required pam_faillock.so preauth'}
+
+    - name: Оставить в sudoers только нужные команды
+      ansible.builtin.copy:
+        dest: /etc/sudoers
+        mode: "0440"
+        validate: visudo -cf %s
+        content: |
+          Defaults env_reset
+          Defaults mail_badpass
+          Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          root ALL=(ALL:ALL) ALL
+          auditor ALL=(root) /usr/bin/systemctl status ssh
+          #includedir /etc/sudoers.d
+
+    - name: Найти файлы sudoers.d
+      ansible.builtin.find:
+        paths: /etc/sudoers.d
+        file_type: file
+      register: host_audit_sudo_dropins
+
+    - name: Удалить широкие правила sudoers.d
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ host_audit_sudo_dropins.files }}"
+
+    - name: Ужесточить права
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: root
+        group: "{{ item.group | default('root') }}"
+      loop:
+        - {path: /etc/passwd, mode: "0644"}
+        - {path: /etc/group, mode: "0644"}
+        - {path: /etc/shadow, mode: "0640", group: shadow}
+        - {path: /etc/gshadow, mode: "0640", group: shadow}
+        - {path: /etc/ssh/sshd_config, mode: "0600"}
+        - {path: /etc/ssh/sshd_config.d/00-hardening.conf, mode: "0600"}
+        - {path: /etc/crontab, mode: "0600"}
+        - {path: /etc/cron.d, mode: "0700"}
+        - {path: /etc/cron.hourly, mode: "0700"}
+        - {path: /etc/cron.daily, mode: "0700"}
+        - {path: /etc/cron.weekly, mode: "0700"}
+        - {path: /etc/cron.monthly, mode: "0700"}
+      failed_when: false
+
+    - name: Параметры ядра
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-host-audit.conf
+        mode: "0644"
+        content: |
+          net.ipv4.ip_forward = 0
+          net.ipv4.conf.all.send_redirects = 0
+          net.ipv4.conf.default.send_redirects = 0
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.conf.default.accept_source_route = 0
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.all.log_martians = 1
+          net.ipv4.conf.default.log_martians = 1
+          net.ipv4.icmp_echo_ignore_broadcasts = 1
+          net.ipv4.icmp_ignore_bogus_error_responses = 1
+          net.ipv4.tcp_syncookies = 1
+          net.ipv4.conf.all.rp_filter = 1
+          net.ipv4.conf.default.rp_filter = 1
+          net.ipv6.conf.all.accept_redirects = 0
+          net.ipv6.conf.default.accept_redirects = 0
+          net.ipv6.conf.all.accept_source_route = 0
+          kernel.randomize_va_space = 2
+          fs.suid_dumpable = 0
+          kernel.dmesg_restrict = 1
+          kernel.kptr_restrict = 1
+          kernel.yama.ptrace_scope = 1
+
+    - name: Применить sysctl
+      ansible.builtin.command:
+        argv: [sysctl, --system]
+      changed_when: false
+      failed_when: false
+
+    - name: Прочитать ip_forward после применения профиля
+      ansible.builtin.command:
+        argv: [sysctl, -n, net.ipv4.ip_forward]
+      register: host_audit_ip_forward
+      changed_when: false
+
+    - name: Фикстура ядра собрана правильно
+      ansible.builtin.assert:
+        that:
+          - host_audit_ip_forward.stdout | trim == "0"
+
+    - name: Источник времени chrony
+      ansible.builtin.lineinfile:
+        path: /etc/chrony/chrony.conf
+        line: pool ntp.ubuntu.com iburst
+        insertbefore: BOF
+        state: present
+
+    - name: Файл журнала, который читает fail2ban
+      ansible.builtin.file:
+        path: /var/log/auth.log
+        state: touch
+        mode: "0640"
+        owner: syslog
+        group: adm
+
+    - name: Убрать приватные ключи, если образ их принёс
+      ansible.builtin.find:
+        paths:
+          - /home
+          - /root
+        recurse: true
+        hidden: true
+        patterns:
+          - id_*
+          - "*.pem"
+        file_type: file
+      register: host_audit_stray_keys
+
+    - name: Удалить приватные ключи хоста
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ host_audit_stray_keys.files }}"
+      when: not item.path.endswith('.pub')
+
+    - name: Включить сервисы профиля
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - rsyslog
+        - ssh
+        - fail2ban
+        - nftables
+        - chrony
+        - apt-daily-upgrade.timer
+
+    - name: Включить unit auditd
+      ansible.builtin.command:
+        argv: [systemctl, enable, auditd.service]
+      changed_when: false
+      failed_when: false
+
+    - name: Запустить auditd, если ядро контейнера это позволяет
+      ansible.builtin.systemd:
+        name: auditd
+        state: started
+      failed_when: false
+
+    - name: Остановить конкурирующий timesyncd
+      ansible.builtin.systemd:
+        name: systemd-timesyncd
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Перечитать sshd последним, чтобы не было дрейфа конфигурации
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+
+    - name: Эффективная конфигурация sshd
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -T, -f, /etc/ssh/sshd_config]
+      register: host_audit_sshd_effective
+      changed_when: false
+
+    - name: Фикстура sshd собрана правильно
+      ansible.builtin.assert:
+        that:
+          - "'passwordauthentication no' in host_audit_sshd_effective.stdout"
+          - "'permitrootlogin no' in host_audit_sshd_effective.stdout"
+          - "'allowusers auditor' in host_audit_sshd_effective.stdout"
+          - "'authenticationmethods publickey,keyboard-interactive' in host_audit_sshd_effective.stdout"
+          - "'usepam yes' in host_audit_sshd_effective.stdout"
+          - "'kbdinteractiveauthentication yes' in host_audit_sshd_effective.stdout"

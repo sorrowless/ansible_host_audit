@@ -1,0 +1,34 @@
+---
+- name: Добрать факты ОС
+  ansible.builtin.setup:
+    gather_subset:
+      - min
+  when: ansible_os_family is not defined
+
+- name: Узнать euid
+  ansible.builtin.command:
+    argv: [id, -u]
+  register: host_audit_id
+  changed_when: false
+
+- name: Остановить запуск без root
+  ansible.builtin.fail:
+    msg: >-
+      host_audit читает /etc/shadow, sudoers и вызывает sshd -T.
+      Запускайте плейбук с become: true от root.
+  when: host_audit_id.stdout != "0"
+
+- name: Собрать факты пакетов
+  ansible.builtin.package_facts:
+    manager: auto
+  failed_when: false
+
+- name: Собрать факты сервисов
+  ansible.builtin.service_facts:
+  failed_when: false
+
+- name: Начать отчёт
+  ansible.builtin.set_fact:
+    host_audit_controls: []
+    host_audit_packages: "{{ ansible_facts.packages | default({}) | list }}"
+    host_audit_services: "{{ ansible_facts.services | default({}) }}"

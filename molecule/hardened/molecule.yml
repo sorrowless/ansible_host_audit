@@ -1,0 +1,54 @@
+---
+dependency:
+  name: galaxy
+  enabled: false
+driver:
+  name: docker
+platforms:
+  - name: instance
+    image: host-audit-ubuntu2404:local
+    pull: false
+    pre_build_image: true
+    override_command: false
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    capabilities:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - AUDIT_CONTROL
+      - AUDIT_WRITE
+    security_opts:
+      - apparmor=unconfined
+      - seccomp=unconfined
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_STRATEGY: linear
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+      stdout_callback: yaml
+  inventory:
+    host_vars:
+      instance:
+        ansible_python_interpreter: /usr/bin/python3
+        host_audit_fail_on: none
+        host_audit_management_host: true
+        host_audit_time_require_synchronized: false
+        host_audit_allowed_tcp_ports:
+          - 22
+        host_audit_allowed_udp_ports: []
+        # Эти ключи в контейнере Docker часто принадлежат ядру хоста и не меняются.
+        # На обычном сервере роль их проверяет: в defaults список skip пуст.
+        host_audit_sysctl_skip:
+          - kernel.dmesg_restrict
+          - kernel.kptr_restrict
+          - kernel.yama.ptrace_scope
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

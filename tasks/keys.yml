@@ -1,0 +1,57 @@
+---
+- name: Искать приватные ключи на целевом хосте
+  host_audit_keys:
+    paths: "{{ host_audit_target_key_paths }}"
+    max_depth: "{{ host_audit_max_key_depth | int }}"
+    max_files: "{{ host_audit_max_key_files | int }}"
+  register: host_audit_target_keys
+  changed_when: false
+
+- name: Зафиксировать SSH-04
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-04', title, 'high', requirement, remediation) }}"
+    checks: "{{ host_audit_target_keys | host_audit_key_checks('target') }}"
+    title: "SSH: на хосте нет приватных ключей в открытом виде"
+    requirement: В /home и /root нет приватных ключей без парольной фразы и с режимом шире 0600.
+    remediation: >-
+      Удалите приватные ключи с сервера. Для входа используйте агент на управляющей машине.
+      Если ключ должен остаться, зашифруйте его и поставьте режим 0600.
+
+- name: Искать ключи на управляющей машине
+  when: host_audit_check_controller_keys | bool
+  block:
+    - name: Просканировать каталоги ключей контроллера
+      host_audit_keys:
+        paths: "{{ host_audit_controller_key_dirs }}"
+        max_depth: "{{ host_audit_max_key_depth | int }}"
+        max_files: "{{ host_audit_max_key_files | int }}"
+      delegate_to: localhost
+      become: false
+      register: host_audit_controller_keys
+      changed_when: false
+
+    - name: Зафиксировать SSH-03
+      ansible.builtin.set_fact:
+        host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+      vars:
+        host_audit_one: "{{ checks | host_audit_control('SSH-03', title, 'high', requirement, remediation) }}"
+        checks: "{{ host_audit_controller_keys | host_audit_key_checks('controller') }}"
+        title: "SSH: ключи управляющей машины защищены парольной фразой"
+        requirement: Приватные ключи, которыми можно войти на хосты, зашифрованы и не доступны группе или остальным.
+        remediation: Выполните ssh-keygen -p -f <ключ> и chmod 0600. Не храните ключ без фразы.
+
+- name: Пропустить SSH-03, если проверка контроллера выключена
+  when: not (host_audit_check_controller_keys | bool)
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-03', title, 'high', requirement, remediation) }}"
+    checks:
+      - name: scope
+        status: skip
+        evidence: проверка ключей управляющей машины выключена (host_audit_check_controller_keys=false)
+    title: "SSH: ключи управляющей машины защищены парольной фразой"
+    requirement: Приватные ключи, которыми можно войти на хосты, зашифрованы и не доступны группе или остальным.
+    remediation: Включите host_audit_check_controller_keys и укажите host_audit_controller_key_dirs.

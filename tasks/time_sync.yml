@@ -1,0 +1,66 @@
+---
+- name: Узнать, синхронизированы ли часы
+  ansible.builtin.command:
+    argv: [timedatectl, show, -p, NTPSynchronized, --value]
+  register: host_audit_ntp_sync
+  changed_when: false
+  failed_when: false
+
+- name: Узнать серверы systemd-timesyncd
+  ansible.builtin.command:
+    argv:
+      - timedatectl
+      - show-timesync
+      - --property=FallbackNTP
+      - --property=SystemNTPServers
+      - --property=ServerName
+  register: host_audit_timesync_show
+  changed_when: false
+  failed_when: false
+
+- name: Прочитать конфигурацию времени
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - /etc/chrony/chrony.conf
+    - /etc/chrony.conf
+    - /etc/systemd/timesyncd.conf
+    - /etc/ntp.conf
+  register: host_audit_time_slurp
+  failed_when: false
+  changed_when: false
+
+- name: Разложить конфигурацию времени
+  ansible.builtin.set_fact:
+    host_audit_time_files: "{{ host_audit_time_files | default({}) | combine({item.item: item.content | b64decode}) }}"
+  loop: "{{ host_audit_time_slurp.results }}"
+  when: item.content is defined
+
+- name: Зафиксировать TIM-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('TIM-01', title, 'high', requirement, remediation) }}"
+    checks: >-
+      {{
+        host_audit_services | host_audit_time_checks(
+          chrony_text,
+          timesyncd_text,
+          host_audit_ntp_sync.stdout | default('') | trim,
+          host_audit_time_require_synchronized | bool
+        )
+      }}
+    chrony_text: >-
+      {{
+        (host_audit_time_files['/etc/chrony/chrony.conf'] | default(''))
+        + '\n' + (host_audit_time_files['/etc/chrony.conf'] | default(''))
+        + '\n' + (host_audit_time_files['/etc/ntp.conf'] | default(''))
+      }}
+    timesyncd_text: >-
+      {{
+        (host_audit_time_files['/etc/systemd/timesyncd.conf'] | default(''))
+        + '\n' + (host_audit_timesync_show.stdout | default(''))
+      }}
+    title: "Время синхронизировано"
+    requirement: Запущена служба времени, у неё заданы серверы, часы синхронизированы.
+    remediation: Установите chrony, укажите pool или server и выполните systemctl enable --now chrony.

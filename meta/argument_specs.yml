@@ -1,0 +1,57 @@
+---
+argument_specs:
+  main:
+    short_description: Проверяет базовую защищённость хоста и пишет отчёт.
+    options:
+      host_audit_fail_on:
+        type: str
+        required: false
+        default: high
+        choices: [none, low, medium, high, critical]
+        description: Порог серьёзности, с которого плейбук завершается ошибкой.
+      host_audit_management_host:
+        type: bool
+        required: false
+        default: false
+        description: Требовать MFA. Включайте на бастионах и других хостах управляющего контура.
+      host_audit_check_controller_keys:
+        type: bool
+        required: false
+        default: true
+        description: Проверять парольные фразы приватных ключей на машине, где запущен Ansible.
+      host_audit_controller_key_dirs:
+        type: list
+        elements: str
+        required: false
+        description: Каталоги приватных ключей управляющей машины.
+      host_audit_allowed_tcp_ports:
+        type: list
+        elements: int
+        required: false
+        description: TCP-порты, которые firewall имеет право открывать.
+      host_audit_allowed_udp_ports:
+        type: list
+        elements: int
+        required: false
+        description: UDP-порты, которые firewall имеет право открывать.
+      host_audit_time_require_synchronized:
+        type: bool
+        required: false
+        default: true
+        description: Требовать NTPSynchronized=yes, а не только запущенную службу времени.
+      host_audit_write_report:
+        type: bool
+        required: false
+        default: true
+        description: Записать JSON и текст отчёта на машину, с которой запущен Ansible.
+      host_audit_report_dir:
+        type: str
+        required: false
+        default: /tmp/ansible/host-audit
+        description: Каталог отчётов на управляющей машине.
+      host_audit_report_host:
+        type: str
+        required: false
+        description: >-
+          Имя хоста в имени файла. По умолчанию inventory_hostname,
+          то есть имя каталога в host_vars.

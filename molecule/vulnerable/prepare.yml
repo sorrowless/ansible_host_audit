@@ -1,0 +1,250 @@
+---
+- name: Prepare vulnerable
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Каталог фикстур на управляющей машине
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/.fixtures/controller-keys"
+        state: "{{ item }}"
+        mode: "0700"
+      loop:
+        - absent
+        - directory
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Ключ контроллера без парольной фразы
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/.fixtures/controller-keys/id_ed25519"
+          - -q
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+
+    - name: Не запускать сервисы из postinst
+      ansible.builtin.copy:
+        dest: /usr/sbin/policy-rc.d
+        content: |
+          #!/bin/sh
+          exit 101
+        mode: "0755"
+
+    - name: Установить ssh и лишний пакет telnet
+      ansible.builtin.apt:
+        name:
+          - openssh-server
+          - telnet
+          - sudo
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Учётки для ключа и демо-доступа
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        shell: /bin/bash
+        create_home: true
+      loop:
+        - {name: demokey}
+        - {name: demo}
+
+    - name: Каталог ключа на хосте
+      ansible.builtin.file:
+        path: /home/demokey/.ssh
+        state: directory
+        owner: demokey
+        group: demokey
+        mode: "0700"
+
+    - name: Незашифрованный ключ в домашнем каталоге
+      ansible.builtin.command:
+        argv: [ssh-keygen, -t, ed25519, -N, "", -f, /home/demokey/.ssh/id_ed25519, -q]
+      changed_when: false
+
+    - name: Режим ключа на хосте
+      ansible.builtin.file:
+        path: /home/demokey/.ssh/id_ed25519
+        owner: demokey
+        group: demokey
+        mode: "0600"
+
+    - name: Найти чужие drop-in sshd
+      ansible.builtin.find:
+        paths: /etc/ssh/sshd_config.d
+        file_type: file
+      register: host_audit_old_dropins
+
+    - name: Удалить чужие drop-in sshd
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ host_audit_old_dropins.files }}"
+
+    - name: Основной sshd_config выглядит безопасным, но читается слишком поздно
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config
+        mode: "0644"
+        content: |
+          Include /etc/ssh/sshd_config.d/*.conf
+          Port 22
+          PasswordAuthentication no
+          PermitRootLogin no
+          KbdInteractiveAuthentication no
+          UsePAM yes
+          PubkeyAuthentication yes
+
+    - name: Ранний drop-in включает пароль и root
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-insecure.conf
+        mode: "0644"
+        content: |
+          PasswordAuthentication yes
+          PermitRootLogin yes
+
+    - name: Поздний drop-in уже не может это отменить
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/50-too-late.conf
+        mode: "0644"
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin no
+
+    - name: Ключи хоста и каталог privilege separation
+      ansible.builtin.command:
+        argv: [ssh-keygen, -A]
+      changed_when: false
+
+    - name: Каталог /run/sshd
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        mode: "0755"
+
+    - name: Запустить sshd
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Эффективная конфигурация действительно разрешает пароль
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -T, -f, /etc/ssh/sshd_config]
+      register: host_audit_sshd_effective
+      changed_when: false
+
+    - name: Фикстура sshd собрана правильно
+      ansible.builtin.assert:
+        that:
+          - "'passwordauthentication yes' in host_audit_sshd_effective.stdout"
+          - "'permitrootlogin yes' in host_audit_sshd_effective.stdout"
+          - "'allowusers' not in host_audit_sshd_effective.stdout"
+
+    - name: NOPASSWD ALL для обычного пользователя
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/99-nopasswd-all
+        content: "demokey ALL=(ALL) NOPASSWD: ALL\n"
+        mode: "0440"
+        validate: visudo -cf %s
+
+    - name: Фиктивный лишний сервис telnet
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/telnet.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Fixture telnet
+          [Service]
+          ExecStart=/bin/sleep infinity
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Запустить фиктивный telnet
+      ansible.builtin.systemd:
+        name: telnet
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Убрать автообновления безопасности
+      ansible.builtin.apt:
+        name: unattended-upgrades
+        state: absent
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Выключить таймер обновлений
+      ansible.builtin.systemd:
+        name: apt-daily-upgrade.timer
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Явно запретить unattended-upgrades
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "0";
+          APT::Periodic::Unattended-Upgrade "0";
+
+    - name: Остановить службы времени
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop:
+        - systemd-timesyncd
+        - chrony
+        - chronyd
+      failed_when: false
+
+    - name: Удалить пересылку логов
+      ansible.builtin.find:
+        paths: /etc/rsyslog.d
+        file_type: file
+      register: host_audit_rsyslog_dropins
+      failed_when: false
+
+    - name: Очистить rsyslog.d
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ host_audit_rsyslog_dropins.files | default([]) }}"
+
+    - name: Сбросить firewall к политике ACCEPT
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [nft, flush, ruleset]
+        - [iptables, -P, INPUT, ACCEPT]
+      failed_when: false
+      changed_when: false
+
+    - name: Испортить параметр ядра, который обязан читаться проверкой
+      ansible.builtin.command:
+        argv: [sysctl, -w, net.ipv4.ip_forward=1]
+      changed_when: false
+
+    - name: Убедиться, что ip_forward действительно включён
+      ansible.builtin.command:
+        argv: [sysctl, -n, net.ipv4.ip_forward]
+      register: host_audit_ip_forward
+      changed_when: false
+
+    - name: Фикстура ядра собрана правильно
+      ansible.builtin.assert:
+        that:
+          - host_audit_ip_forward.stdout | trim == "1"

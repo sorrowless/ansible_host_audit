@@ -1,0 +1,80 @@
+---
+- name: Verify hardened
+  hosts: all
+  gather_facts: false
+  vars:
+    host_audit_expected_status:
+      SSH-01: pass
+      SSH-02: pass
+      SSH-03: pass
+      SSH-04: pass
+      SSH-05: pass
+      SSH-06: pass
+      SSH-07: pass
+      SUD-01: pass
+      HRN-01: pass
+      HRN-02: pass
+      HRN-03: pass
+      UPD-01: pass
+      FW-01: pass
+      SVC-01: pass
+      LOG-01: pass
+      TIM-01: pass
+  tasks:
+    - name: Прочитать отчёт
+      ansible.builtin.slurp:
+        src: "/tmp/ansible/host-audit/{{ inventory_hostname }}-host-audit.json"
+      delegate_to: localhost
+      become: false
+      register: host_audit_report_raw
+
+    - name: Разобрать отчёт
+      ansible.builtin.set_fact:
+        host_audit_report: "{{ host_audit_report_raw.content | b64decode | from_json }}"
+
+    - name: Индекс статусов
+      ansible.builtin.set_fact:
+        host_audit_by_id: "{{ host_audit_report.controls | items2dict(key_name='id', value_name='status') }}"
+
+    - name: Защищённый хост проходит контроли
+      ansible.builtin.assert:
+        that:
+          - host_audit_by_id[item.key] is defined
+          - host_audit_by_id[item.key] == item.value
+        fail_msg: >-
+          {{ item.key }}: ожидалось {{ item.value }},
+          получено {{ host_audit_by_id[item.key] | default('нет контроля') }}.
+          {{ host_audit_report.controls | selectattr('id', 'equalto', item.key) | map(attribute='checks') | first | default([]) }}
+      loop: "{{ host_audit_expected_status | dict2items }}"
+
+    - name: SSH-01 берёт no из раннего drop-in, хотя основной файл говорит yes
+      ansible.builtin.assert:
+        that:
+          - "'00-hardening.conf' in evidence"
+          - "'PasswordAuthentication no' in evidence"
+        fail_msg: "{{ evidence }}"
+      vars:
+        evidence: >-
+          {{
+            host_audit_report.controls
+            | selectattr('id', 'equalto', 'SSH-01')
+            | map(attribute='checks')
+            | first
+            | map(attribute='evidence')
+            | join(' ')
+          }}
+
+    - name: Выделить AUD-01
+      ansible.builtin.set_fact:
+        host_audit_audit: "{{ host_audit_report.controls | selectattr('id', 'equalto', 'AUD-01') | first }}"
+
+    - name: Правила auditd на месте, а демон может быть недоступен ядру контейнера
+      ansible.builtin.assert:
+        that:
+          - host_audit_audit.status in ['pass', 'warn']
+          - (host_audit_audit.checks | selectattr('name', 'equalto', 'rules_identity') | map(attribute='status') | first) == 'pass'
+          - (host_audit_audit.checks | selectattr('name', 'equalto', 'rules_sudo') | map(attribute='status') | first) == 'pass'
+          - (host_audit_audit.checks | selectattr('name', 'equalto', 'rules_time') | map(attribute='status') | first) == 'pass'
+          - (host_audit_audit.checks | selectattr('name', 'equalto', 'service_enabled') | map(attribute='status') | first) == 'pass'
+          - (host_audit_audit.checks | selectattr('name', 'equalto', 'service_active') | map(attribute='status') | first) in ['pass', 'warn']
+        fail_msg: "{{ host_audit_audit | to_nice_json }}"

@@ -1,0 +1,115 @@
+---
+- name: Прочитать параметры ядра
+  ansible.builtin.command:
+    argv: [sysctl, -n, "{{ item.key }}"]
+  loop: "{{ host_audit_sysctl }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: host_audit_sysctl_raw
+  changed_when: false
+  failed_when: false
+
+- name: Зафиксировать HRN-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('HRN-01', title, 'high', requirement, remediation) }}"
+    checks: >-
+      {{
+        host_audit_sysctl_raw.results | host_audit_sysctl_checks(
+          host_audit_sysctl,
+          host_audit_sysctl_skip
+        )
+      }}
+    title: "Базовый профиль: параметры ядра"
+    requirement: Параметры sysctl соответствуют локальному профилю, близкому к CIS Level 1.
+    remediation: Запишите ожидаемые значения в /etc/sysctl.d/99-hardening.conf и выполните sysctl --system.
+
+- name: Узнать права файлов
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ host_audit_file_modes }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: host_audit_perm_raw
+  failed_when: false
+
+- name: Найти drop-in файлы sshd
+  ansible.builtin.find:
+    paths: /etc/ssh/sshd_config.d
+    file_type: file
+    recurse: false
+  register: host_audit_sshd_dropins
+  failed_when: false
+
+- name: Узнать права drop-in sshd
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ host_audit_sshd_dropins.files | default([]) }}"
+  register: host_audit_dropin_stats
+  failed_when: false
+  when: host_audit_sshd_dropins.files is defined
+
+- name: Зафиксировать HRN-02
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('HRN-02', title, 'high', requirement, remediation) }}"
+    checks: "{{ perm_checks + dropin_checks }}"
+    perm_checks: "{{ host_audit_perm_raw.results | host_audit_perm_checks }}"
+    dropin_checks: "{{ (host_audit_dropin_stats.results | default([])) | host_audit_dropin_rows | host_audit_perm_checks }}"
+    title: "Базовый профиль: права на файлы"
+    requirement: Права на passwd, shadow, sshd и cron не шире согласованного потолка, владелец — root.
+    remediation: Выставьте режимы из host_audit_file_modes. Файлы в sshd_config.d должны быть 0600 и принадлежать root.
+
+- name: Прочитать файлы парольной политики
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - /etc/login.defs
+    - /etc/security/pwquality.conf
+    - /etc/security/faillock.conf
+    - /etc/default/useradd
+    - /etc/pam.d/common-password
+    - /etc/pam.d/common-auth
+    - /etc/pam.d/system-auth
+    - /etc/pam.d/password-auth
+  register: host_audit_policy_slurp
+  failed_when: false
+  changed_when: false
+
+- name: Сложить файлы парольной политики
+  ansible.builtin.set_fact:
+    host_audit_policy_files: "{{ host_audit_policy_files | default({}) | combine({item.item: item.content | b64decode}) }}"
+  loop: "{{ host_audit_policy_slurp.results }}"
+  when: item.content is defined
+
+- name: Найти учётки с пустым паролем
+  ansible.builtin.command:
+    argv:
+      - awk
+      - -F:
+      - '($2 == "") { print $1 }'
+      - /etc/shadow
+  register: host_audit_empty_passwords
+  changed_when: false
+  failed_when: false
+
+- name: Зафиксировать HRN-03
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('HRN-03', title, 'high', requirement, remediation) }}"
+    checks: >-
+      {{
+        (host_audit_policy_files | default({})) | host_audit_password_checks(
+          host_audit_password_policy,
+          host_audit_empty_passwords.stdout_lines | default([])
+        )
+      }}
+    title: "Базовый профиль: парольная политика локальных учёток"
+    requirement: >-
+      login.defs, pwquality, история паролей и faillock заданы, даже если вход SSH по паролю выключен.
+    remediation: >-
+      Ограничьте PASS_MAX_DAYS, включите pam_pwquality, pam_pwhistory с remember
+      и pam_faillock. Пустых паролей быть не должно.

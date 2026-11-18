@@ -1,0 +1,52 @@
+---
+- name: Собрать отчёт
+  ansible.builtin.set_fact:
+    host_audit_report_host: "{{ host_audit_report_host | host_audit_report_name }}"
+    host_audit_report:
+      host: "{{ host_audit_report_host | host_audit_report_name }}"
+      fqdn: "{{ ansible_fqdn | default(inventory_hostname) }}"
+      os_family: "{{ ansible_os_family | default('') }}"
+      collected_at: "{{ ansible_date_time.iso8601 | default('') }}"
+      fail_on: "{{ host_audit_fail_on }}"
+      summary: "{{ host_audit_controls | host_audit_summary }}"
+      controls: "{{ host_audit_controls }}"
+
+- name: Подготовить каталог отчётов на управляющей машине
+  ansible.builtin.file:
+    path: "{{ host_audit_report_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  when: host_audit_write_report | bool
+
+- name: Записать JSON-отчёт на управляющей машине
+  ansible.builtin.copy:
+    dest: "{{ host_audit_report_path }}"
+    content: "{{ host_audit_report | to_nice_json }}\n"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: host_audit_write_report | bool
+
+- name: Записать текстовый отчёт на управляющей машине
+  ansible.builtin.copy:
+    dest: "{{ host_audit_report_text_path }}"
+    content: "{{ host_audit_report | host_audit_render_text }}\n"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: host_audit_write_report | bool
+
+- name: Показать итог
+  ansible.builtin.debug:
+    msg: "{{ host_audit_report | host_audit_render_text }}"
+
+- name: Остановить прогон, если нарушения не ниже порога
+  ansible.builtin.fail:
+    msg: "{{ host_audit_report | host_audit_render_text }}"
+  when: host_audit_report | host_audit_should_fail(host_audit_fail_on)

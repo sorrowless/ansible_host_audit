@@ -1,0 +1,17 @@
+---
+- name: Спросить fail2ban про jail sshd
+  ansible.builtin.command:
+    argv: [fail2ban-client, status, sshd]
+  register: host_audit_fail2ban
+  changed_when: false
+  failed_when: false
+
+- name: Зафиксировать SSH-06
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-06', title, 'high', requirement, remediation) }}"
+    checks: "{{ host_audit_services | host_audit_bruteforce_checks(host_audit_fail2ban.rc | default(127)) }}"
+    title: "SSH: повторные неудачные входы блокируются"
+    requirement: Запущен fail2ban с jail sshd, либо sshguard, либо crowdsec вместе с firewall bouncer.
+    remediation: Установите fail2ban, включите jail sshd и выполните systemctl enable --now fail2ban.

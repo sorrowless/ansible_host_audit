@@ -1,0 +1,80 @@
+---
+- name: Прочитать /etc/sudoers
+  ansible.builtin.slurp:
+    src: /etc/sudoers
+  register: host_audit_sudoers_main
+  failed_when: false
+
+- name: Найти файлы в /etc/sudoers.d
+  ansible.builtin.find:
+    paths: /etc/sudoers.d
+    file_type: file
+    recurse: false
+  register: host_audit_sudoers_dir
+  failed_when: false
+
+- name: Собрать пути sudoers
+  ansible.builtin.set_fact:
+    host_audit_sudo_paths: "{{ ['/etc/sudoers'] + ((host_audit_sudoers_dir.files | default([])) | map(attribute='path') | list) }}"
+
+- name: Добавить явные include
+  when: host_audit_sudoers_main.content is defined
+  ansible.builtin.set_fact:
+    host_audit_sudo_paths: >-
+      {{
+        host_audit_sudo_paths
+        + ((host_audit_sudoers_main.content | b64decode) | host_audit_sudo_includes | map(attribute='path') | list)
+      }}
+
+- name: Прочитать все файлы sudoers
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ host_audit_sudo_paths | unique }}"
+  register: host_audit_sudo_slurp
+  failed_when: false
+  changed_when: false
+
+- name: Сложить содержимое sudoers
+  ansible.builtin.set_fact:
+    host_audit_sudo_files: "{{ host_audit_sudo_files | default([]) + [{'path': item.item, 'content': item.content | b64decode}] }}"
+  loop: "{{ host_audit_sudo_slurp.results }}"
+  when: item.content is defined
+
+- name: Узнать режим файлов sudoers
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ host_audit_sudo_files | default([]) }}"
+  register: host_audit_sudo_stats
+  failed_when: false
+
+- name: Собрать режимы sudoers
+  ansible.builtin.set_fact:
+    host_audit_sudo_modes: >-
+      {{
+        dict(
+          (host_audit_sudo_stats.results | default([]))
+          | selectattr('stat', 'defined')
+          | selectattr('stat.exists', 'equalto', true)
+          | map(attribute='stat.path')
+          | list
+          | zip(
+              (host_audit_sudo_stats.results | default([]))
+              | selectattr('stat', 'defined')
+              | selectattr('stat.exists', 'equalto', true)
+              | map(attribute='stat.mode')
+              | list
+            )
+        )
+      }}
+
+- name: Зафиксировать SUD-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SUD-01', title, 'high', requirement, remediation) }}"
+    checks: "{{ (host_audit_sudo_files | default([])) | host_audit_sudo_checks(host_audit_sudo_modes | default({})) }}"
+    title: "sudo: нет полного NOPASSWD и лишних прав на все команды"
+    requirement: Кроме root, никто не получает ALL и никто не получает NOPASSWD:ALL.
+    remediation: >-
+      Оставьте root ALL=(ALL) ALL. Остальным перечислите конкретные команды.
+      Удалите правила вида %sudo ALL=(ALL) ALL и любые NOPASSWD: ALL.

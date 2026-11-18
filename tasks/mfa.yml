@@ -1,0 +1,88 @@
+---
+- name: Проверить MFA на управляющем контуре
+  when: host_audit_management_host | bool
+  block:
+    - name: Прочитать /etc/pam.d/sshd
+      ansible.builtin.slurp:
+        src: /etc/pam.d/sshd
+      register: host_audit_pam_sshd
+      failed_when: false
+
+    - name: Взять текст PAM sshd
+      ansible.builtin.set_fact:
+        host_audit_pam_text: "{{ (host_audit_pam_sshd.content | b64decode) if (host_audit_pam_sshd.content is defined) else '' }}"
+
+    - name: Прочитать включённые PAM-файлы
+      ansible.builtin.slurp:
+        src: "/etc/pam.d/{{ item }}"
+      loop: "{{ host_audit_pam_text | host_audit_pam_includes }}"
+      register: host_audit_pam_included
+      failed_when: false
+      changed_when: false
+
+    - name: Собрать стек PAM
+      ansible.builtin.set_fact:
+        host_audit_pam_text: "{{ host_audit_pam_text + '\n' + (item.content | b64decode) }}"
+      loop: "{{ host_audit_pam_included.results | default([]) }}"
+      when: item.content is defined
+
+    - name: Найти файлы модулей MFA
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        patterns: "{{ host_audit_mfa_modules }}"
+        file_type: file
+        recurse: true
+        depth: 6
+      loop:
+        - /lib
+        - /usr/lib
+        - /lib64
+        - /usr/lib64
+      register: host_audit_mfa_libs
+      failed_when: false
+      changed_when: false
+
+    - name: Имена найденных модулей
+      ansible.builtin.set_fact:
+        host_audit_mfa_found: >-
+          {{
+            host_audit_mfa_libs.results
+            | selectattr('files', 'defined')
+            | map(attribute='files')
+            | flatten
+            | map(attribute='path')
+            | map('basename')
+            | unique
+            | list
+          }}
+
+    - name: Зафиксировать SSH-07
+      ansible.builtin.set_fact:
+        host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+      vars:
+        host_audit_one: "{{ checks | host_audit_control('SSH-07', title, 'high', requirement, remediation) }}"
+        checks: >-
+          {{
+            host_audit_sshd | host_audit_mfa_checks(
+              host_audit_pam_text,
+              host_audit_mfa_found,
+              true,
+              host_audit_mfa_modules
+            )
+          }}
+        title: "SSH: на управляющем контуре включён второй фактор"
+        requirement: Интерактивный административный SSH требует ключ и второй фактор, а не пароль.
+        remediation: >-
+          Задайте AuthenticationMethods publickey,keyboard-interactive, UsePAM yes
+          и строку auth required для pam_google_authenticator.so или эквивалента.
+
+- name: Пропустить SSH-07 вне управляющего контура
+  when: not (host_audit_management_host | bool)
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('SSH-07', title, 'high', requirement, remediation) }}"
+    checks: "{{ {} | host_audit_mfa_checks('', [], false, host_audit_mfa_modules) }}"
+    title: "SSH: на управляющем контуре включён второй фактор"
+    requirement: Интерактивный административный SSH требует ключ и второй фактор, а не пароль.
+    remediation: Отметьте бастион и админские хосты как host_audit_management_host=true.

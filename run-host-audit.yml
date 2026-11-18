@@ -1,0 +1,20 @@
+#!/usr/bin/env ansible-playbook
+#
+# Проверка базовой защищённости. Роль ничего на хостах не меняет.
+# Отчёты появляются на машине, с которой запущен Ansible:
+#
+#   /tmp/ansible/host-audit/<host>-host-audit.txt
+#   /tmp/ansible/host-audit/<host>-host-audit.json
+#
+# <host> — имя каталога в host_vars (в inventory это имя хоста).
+#
+#   ./run-host-audit.yml -i inventory/hosts.py
+#   ./run-host-audit.yml -i inventory/hosts.py -l web-01,web-02
+#
+---
+- name: Проверить базовую защищённость хостов
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - role: host_audit

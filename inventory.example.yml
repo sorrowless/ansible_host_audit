@@ -1,0 +1,18 @@
+---
+all:
+  vars:
+    ansible_user: root
+    host_audit_allowed_tcp_ports:
+      - 22
+    host_audit_allowed_udp_ports: []
+  children:
+    targets:
+      hosts:
+        web1:
+          ansible_host: 10.0.0.10
+    management:
+      vars:
+        host_audit_management_host: true
+      hosts:
+        bastion:
+          ansible_host: 10.0.0.5

@@ -1,0 +1,39 @@
+---
+- name: Подготовка фактов
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: SSH-конфигурация
+  ansible.builtin.import_tasks: ssh.yml
+
+- name: SSH-ключи
+  ansible.builtin.import_tasks: keys.yml
+
+- name: Защита от перебора
+  ansible.builtin.import_tasks: bruteforce.yml
+
+- name: MFA управляющего контура
+  ansible.builtin.import_tasks: mfa.yml
+
+- name: Проверить sudoers
+  ansible.builtin.import_tasks: sudoers.yml
+
+- name: Базовый профиль
+  ansible.builtin.import_tasks: baseline.yml
+
+- name: Обновления безопасности
+  ansible.builtin.import_tasks: updates.yml
+
+- name: Firewall
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Лишние пакеты, сервисы и учётки
+  ansible.builtin.import_tasks: surface.yml
+
+- name: Аудит и доставка логов
+  ansible.builtin.import_tasks: audit_logging.yml
+
+- name: Синхронизация времени
+  ansible.builtin.import_tasks: time_sync.yml
+
+- name: Отчёт
+  ansible.builtin.import_tasks: report.yml

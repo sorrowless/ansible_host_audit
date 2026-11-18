@@ -1,0 +1,82 @@
+---
+- name: Verify vulnerable
+  hosts: all
+  gather_facts: false
+  vars:
+    host_audit_expected_status:
+      SSH-01: fail
+      SSH-02: fail
+      SSH-03: fail
+      SSH-04: fail
+      SSH-05: fail
+      SSH-06: fail
+      SSH-07: fail
+      SUD-01: fail
+      HRN-01: fail
+      HRN-02: fail
+      HRN-03: fail
+      UPD-01: fail
+      FW-01: fail
+      SVC-01: fail
+      AUD-01: fail
+      LOG-01: fail
+      TIM-01: fail
+  tasks:
+    - name: Прочитать отчёт
+      ansible.builtin.slurp:
+        src: "/tmp/ansible/host-audit/{{ inventory_hostname }}-host-audit.json"
+      delegate_to: localhost
+      become: false
+      register: host_audit_report_raw
+
+    - name: Разобрать отчёт
+      ansible.builtin.set_fact:
+        host_audit_report: "{{ host_audit_report_raw.content | b64decode | from_json }}"
+
+    - name: Индекс статусов
+      ansible.builtin.set_fact:
+        host_audit_by_id: "{{ host_audit_report.controls | items2dict(key_name='id', value_name='status') }}"
+
+    - name: Незащищённый хост проваливает все контроли
+      ansible.builtin.assert:
+        that:
+          - host_audit_by_id[item.key] is defined
+          - host_audit_by_id[item.key] == item.value
+        fail_msg: >-
+          {{ item.key }}: ожидалось {{ item.value }},
+          получено {{ host_audit_by_id[item.key] | default('нет контроля') }}.
+          {{ host_audit_report.controls | selectattr('id', 'equalto', item.key) | map(attribute='checks') | first | default([]) }}
+      loop: "{{ host_audit_expected_status | dict2items }}"
+
+    - name: SSH-01 указывает на ранний drop-in, а не на «безопасный» основной файл
+      ansible.builtin.assert:
+        that:
+          - "'00-insecure.conf' in evidence"
+          - "'PasswordAuthentication yes' in evidence"
+          - "'50-too-late.conf' not in evidence"
+        fail_msg: "{{ evidence }}"
+      vars:
+        evidence: >-
+          {{
+            host_audit_report.controls
+            | selectattr('id', 'equalto', 'SSH-01')
+            | map(attribute='checks')
+            | first
+            | map(attribute='evidence')
+            | join(' ')
+          }}
+
+    - name: SUD-01 видит NOPASSWD ALL
+      ansible.builtin.assert:
+        that:
+          - "'NOPASSWD' in evidence"
+      vars:
+        evidence: >-
+          {{
+            host_audit_report.controls
+            | selectattr('id', 'equalto', 'SUD-01')
+            | map(attribute='checks')
+            | first
+            | map(attribute='evidence')
+            | join(' ')
+          }}

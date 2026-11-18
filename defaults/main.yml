@@ -1,0 +1,194 @@
+---
+# Порог, с которого плейбук завершается ошибкой: none, low, medium, high, critical.
+host_audit_fail_on: high
+
+# Отчёты пишутся на машину, с которой запущен Ansible, а не на целевой хост.
+# Имя файла — каталог хоста в host_vars. В inventory это inventory_hostname.
+host_audit_write_report: true
+host_audit_report_dir: /tmp/ansible/host-audit
+host_audit_report_host: "{{ inventory_hostname }}"
+host_audit_report_path: "{{ host_audit_report_dir }}/{{ host_audit_report_host }}-host-audit.json"
+host_audit_report_text_path: "{{ host_audit_report_dir }}/{{ host_audit_report_host }}-host-audit.txt"
+
+host_audit_sshd_config: /etc/ssh/sshd_config
+
+# Управляющий контур: бастион, jump-хост, админская ВМ. На остальных MFA не требуется.
+host_audit_management_host: false
+
+# Каталоги приватных ключей на машине, с которой запускается Ansible.
+host_audit_check_controller_keys: true
+host_audit_controller_key_dirs:
+  - "{{ lookup('env', 'HOME') }}/.ssh"
+
+# Где на целевом хосте не должно лежать приватных ключей в открытом виде.
+host_audit_target_key_paths:
+  - /home
+  - /root
+host_audit_max_key_depth: 6
+host_audit_max_key_files: 8000
+
+# Порты, которые firewall имеет право открывать. Всё остальное — нарушение.
+host_audit_allowed_tcp_ports:
+  - 22
+host_audit_allowed_udp_ports: []
+
+# В контейнере и на первой установке chrony можно не требовать NTPSynchronized=yes.
+host_audit_time_require_synchronized: true
+
+# Ключи sysctl из этого списка не валят контроль (остаются в отчёте как skip).
+host_audit_sysctl_skip: []
+
+host_audit_mfa_modules:
+  - pam_google_authenticator.so
+  - pam_oath.so
+  - pam_duo.so
+  - pam_u2f.so
+  - pam_yubico.so
+  - pam_securid.so
+
+host_audit_password_policy:
+  pass_max_days: 365
+  pass_min_days: 1
+  pass_warn_age: 7
+  minlen: 14
+  minclass: 4
+  remember: 5
+  fail_deny: 5
+  unlock_time: 900
+  inactive_days: 30
+
+# Режим «не шире»: 0600 проходит проверку с потолком 0640, 0664 — нет.
+host_audit_file_modes:
+  - path: /etc/passwd
+    mode_max: "0644"
+    owner: root
+    group_any:
+      - root
+  - path: /etc/group
+    mode_max: "0644"
+    owner: root
+    group_any:
+      - root
+  - path: /etc/shadow
+    mode_max: "0640"
+    owner: root
+    group_any:
+      - shadow
+      - root
+  - path: /etc/gshadow
+    mode_max: "0640"
+    owner: root
+    group_any:
+      - shadow
+      - root
+  - path: /etc/ssh/sshd_config
+    mode_max: "0600"
+    owner: root
+    group_any:
+      - root
+  - path: /etc/crontab
+    mode_max: "0600"
+    owner: root
+    group_any:
+      - root
+    optional: true
+  - path: /etc/cron.d
+    mode_max: "0700"
+    owner: root
+    group_any:
+      - root
+    optional: true
+  - path: /etc/cron.hourly
+    mode_max: "0700"
+    owner: root
+    group_any:
+      - root
+    optional: true
+  - path: /etc/cron.daily
+    mode_max: "0700"
+    owner: root
+    group_any:
+      - root
+    optional: true
+  - path: /etc/cron.weekly
+    mode_max: "0700"
+    owner: root
+    group_any:
+      - root
+    optional: true
+  - path: /etc/cron.monthly
+    mode_max: "0700"
+    owner: root
+    group_any:
+      - root
+    optional: true
+
+host_audit_sysctl:
+  - {key: net.ipv4.ip_forward, op: eq, value: "0"}
+  - {key: net.ipv4.conf.all.send_redirects, op: eq, value: "0"}
+  - {key: net.ipv4.conf.default.send_redirects, op: eq, value: "0"}
+  - {key: net.ipv4.conf.all.accept_source_route, op: eq, value: "0"}
+  - {key: net.ipv4.conf.default.accept_source_route, op: eq, value: "0"}
+  - {key: net.ipv4.conf.all.accept_redirects, op: eq, value: "0"}
+  - {key: net.ipv4.conf.default.accept_redirects, op: eq, value: "0"}
+  - {key: net.ipv4.conf.all.log_martians, op: eq, value: "1"}
+  - {key: net.ipv4.conf.default.log_martians, op: eq, value: "1"}
+  - {key: net.ipv4.icmp_echo_ignore_broadcasts, op: eq, value: "1"}
+  - {key: net.ipv4.icmp_ignore_bogus_error_responses, op: eq, value: "1"}
+  - {key: net.ipv4.tcp_syncookies, op: eq, value: "1"}
+  - {key: net.ipv4.conf.all.rp_filter, op: eq, value: "1"}
+  - {key: net.ipv4.conf.default.rp_filter, op: eq, value: "1"}
+  - {key: net.ipv6.conf.all.accept_redirects, op: eq, value: "0", optional: true}
+  - {key: net.ipv6.conf.default.accept_redirects, op: eq, value: "0", optional: true}
+  - {key: net.ipv6.conf.all.accept_source_route, op: eq, value: "0", optional: true}
+  - {key: kernel.randomize_va_space, op: eq, value: "2"}
+  - {key: fs.suid_dumpable, op: eq, value: "0"}
+  - {key: kernel.dmesg_restrict, op: ge, value: "1"}
+  - {key: kernel.kptr_restrict, op: ge, value: "1"}
+  - {key: kernel.yama.ptrace_scope, op: ge, value: "1"}
+
+host_audit_forbidden_packages:
+  - telnet
+  - telnetd
+  - inetutils-telnetd
+  - rsh-server
+  - rsh-client
+  - rsh-redone-server
+  - talk
+  - talkd
+  - nis
+  - xinetd
+  - tftp
+  - tftpd
+  - tftpd-hpa
+  - prelink
+
+host_audit_forbidden_services:
+  - avahi-daemon
+  - cups
+  - cups-browsed
+  - rpcbind
+  - nfs-server
+  - nfs-kernel-server
+  - vsftpd
+  - pure-ftpd
+  - telnet
+  - telnet.socket
+  - rsh.socket
+  - rlogin.socket
+  - rexec.socket
+  - snmpd
+  - squid
+  - xinetd
+  - inetd
+  - tftpd
+
+# Учётка из списка допустима, только если shell — nologin/false и пароль заблокирован.
+host_audit_demo_accounts:
+  - games
+  - news
+  - gopher
+  - ftp
+  - demo
+  - test
+  - guest

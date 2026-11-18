@@ -1,0 +1,70 @@
+---
+- name: Найти файлы apt.conf.d
+  ansible.builtin.find:
+    paths: /etc/apt/apt.conf.d
+    file_type: file
+    recurse: false
+  register: host_audit_apt_conf
+  failed_when: false
+
+- name: Прочитать настройки автообновлений
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ apt_paths }}"
+  vars:
+    apt_paths: >-
+      {{
+        (host_audit_apt_conf.files | default([]) | map(attribute='path') | list)
+        + ['/etc/dnf/automatic.conf']
+      }}
+  register: host_audit_update_slurp
+  failed_when: false
+  changed_when: false
+
+- name: Сложить файлы автообновлений
+  ansible.builtin.set_fact:
+    host_audit_update_files: "{{ host_audit_update_files | default({}) | combine({item.item: item.content | b64decode}) }}"
+  loop: "{{ host_audit_update_slurp.results }}"
+  when: item.content is defined
+
+- name: Проверить, включены ли таймеры обновлений
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, "{{ item }}"]
+  loop:
+    - apt-daily-upgrade.timer
+    - dnf-automatic-install.timer
+    - dnf-automatic.timer
+  register: host_audit_update_timers
+  changed_when: false
+  failed_when: false
+
+- name: Запомнить состояние таймеров обновлений
+  ansible.builtin.set_fact:
+    host_audit_update_timer_state: >-
+      {{
+        host_audit_update_timer_state | default({})
+        | combine({item.item: (item.stdout | default('')) | trim})
+      }}
+  loop: "{{ host_audit_update_timers.results | default([]) }}"
+  when: item.item is defined
+
+- name: Зафиксировать UPD-01
+  ansible.builtin.set_fact:
+    host_audit_controls: "{{ host_audit_controls + [host_audit_one] }}"
+  vars:
+    host_audit_one: "{{ checks | host_audit_control('UPD-01', title, 'high', requirement, remediation) }}"
+    checks: >-
+      {{
+        ansible_os_family | host_audit_update_checks(
+          host_audit_packages,
+          host_audit_update_files | default({}),
+          host_audit_services,
+          host_audit_update_timer_state | default({})
+        )
+      }}
+    title: "Устанавливаются обновления безопасности"
+    requirement: Включён unattended-upgrades или dnf-automatic и в область входят security-обновления.
+    remediation: >-
+      Debian: пакет unattended-upgrades, APT::Periodic::Unattended-Upgrade "1",
+      origin -security и таймер apt-daily-upgrade.
+      RHEL: dnf-automatic, upgrade_type=security, apply_updates=yes.

@@ -1,0 +1,31 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Каталог роли сценария
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/roles"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Опубликовать роль под именем host_audit
+      ansible.builtin.file:
+        src: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+        dest: "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/roles/host_audit"
+        state: link
+        force: true
+      delegate_to: localhost
+      become: false
+      run_once: true
+  tasks:
+    - name: Запустить аудит
+      ansible.builtin.include_role:
+        name: host_audit
+      vars:
+        host_audit_controller_key_dirs:
+          - "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/.fixtures/controller-keys"
